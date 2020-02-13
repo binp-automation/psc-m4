@@ -180,6 +180,8 @@ ADD_EXECUTABLE(psc_m4
     "${ProjDirPath}/src/app_ecspi.h"
     "${ProjDirPath}/src/app_rpmsg.c"
     "${ProjDirPath}/src/app_rpmsg.h"
+    "${ProjDirPath}/src/app_gpio.c"
+    "${ProjDirPath}/src/app_gpio.h"
     "${ProjDirPath}/src/FreeRTOSConfig.h"
     "${ProjDirPath}/src/hardware_init.c"
     "${ProjDirPath}/src/main.c"

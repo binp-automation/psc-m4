@@ -30,29 +30,44 @@
 
 #include "board.h"
 #include "pin_mux.h"
+#include "gpio_pins.h"
+#include "gpio_imx.h"
 
-#include "app_gpio.h"
-#include "app_ecspi.h"
-#include "app_gpt.h"
+#include "app.h"
 
 
-void hardware_init(void)
-{
-    /* Board specific RDC settings */
-    BOARD_RdcInit();
+static gpio_config_t app_gpio_pin = {
+    "AppGpio",                           /* name */
+    &IOMUXC_SW_MUX_CTL_PAD_EPDC_DATA04,  /* muxReg */
+    5,                                   /* muxConfig */
+    &IOMUXC_SW_PAD_CTL_PAD_EPDC_DATA04,  /* padReg */
+    0,                                   /* padConfig */
+    GPIO2,                               /* base */
+    4                                    /* pin */
+};
 
-    /* Board specific clock settings */
-    BOARD_ClockInit();
+void APP_GPIO_HardwareInit() {
+    /* In this demo, we need to share board GPIO, we can set sreq argument to true
+     * when the peer core could also access GPIO with RDC_SEMAPHORE, or the peer
+     * core doesn't access the GPIO at all */
+    //RDC_SetPdapAccess(RDC, BOARD_GPIO_KEY_RDC_PDAP, 0xFF, false/*true*/, false);
 
-    /* initialize debug uart */
-    dbg_uart_init();
+    /* Configure gpio pin IOMUX */
+    configure_gpio_pin(&app_gpio_pin);
+}
 
-    /* Initialize GPIO */
-    APP_GPIO_HardwareInit();
+uint8_t APP_GPIO_Init() {
+    gpio_init_config_t pinInit = {
+        .pin           = app_gpio_pin.pin,
+        .direction     = gpioDigitalOutput,
+        .interruptMode = gpioNoIntmode
+    };
 
-    /* Initialize ECSPI hardware */
-    APP_ECSPI_HardwareInit();
+    GPIO_Init(app_gpio_pin.base, &pinInit);
+    return 0;
+}
 
-    /* Initialize GPT hardware */
-    APP_GPT_HardwareInit();
+uint8_t APP_GPIO_Set(uint8_t on) {
+    GPIO_WritePinOutput(app_gpio_pin.base, app_gpio_pin.pin, on ? gpioPinSet : gpioPinClear);
+    return 0;
 }
