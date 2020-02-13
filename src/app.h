@@ -3,6 +3,7 @@
 #include "app_log.h"
 
 
+#define APP_ECSPI_IRQ_PRIORITY     3
 #define APP_FLEXCAN_IRQ_PRIORITY   3
 #define APP_GPT_IRQ_PRIORITY       3
 #define APP_MU_IRQ_PRIORITY        3
@@ -19,13 +20,13 @@ void panic();
     panic()
 
 #define ASSERT(expr) \
-    if (expr) { \
+    if (!(expr)) { \
         PANIC_("Assertion failed:\r\n" #expr); \
     } \
     do {} while(0)
 
 #define ASSERT_(expr, format, ...) \
-    if (expr) { \
+    if (!(expr)) { \
         PANIC_("Assertion failed:\r\n" #expr "\r\n" format, __VA_ARGS__); \
     } \
     do {} while(0)

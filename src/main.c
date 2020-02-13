@@ -10,116 +10,36 @@
 #include "semphr.h"
 
 #include "app.h"
-#include "app_flexcan.h"
+#include "app_ecspi.h"
 #include "app_gpt.h"
-#include "app_rpmsg.h"
 #include "app_time.h"
 #include "app_log.h"
 
 
 #define APP_TASK_STACK_SIZE    256
-#define APP_RPMSG_BUF_SIZE     256
-
-static SemaphoreHandle_t wf_send_sem = NULL;
-static SemaphoreHandle_t wf_ready_sem = NULL;
-
-#define APP_WF_BUF_SIZE        APP_RPMSG_BUF_SIZE
-#define APP_WF_OFFSET          1
-#define APP_WF_POINT_SIZE      3
-
-static uint8_t wf_buffers[2][APP_WF_BUF_SIZE] = {{0}, {0}};
-static volatile uint8_t wf_current = 0;
 
 
-static void APP_Task_FlexcanSend(void *param) {
-    APP_FLEXCAN_Frame frame = {
-        .id = 0x123,
-        .len = 8,
-        .data = {0}
-    };
-    uint8_t *buf = NULL;
-    size_t pos = 0;
+static void APP_Task_EcspiSend(void *param) {
+    uint8_t txbuf[4];
+    SemaphoreHandle_t send_sem = (SemaphoreHandle_t)param;
 
-    APP_INFO("FLEXCAN task start");
+    APP_INFO("SPI send task start");
 
+    uint32_t counter = 0;
     while (true) {
-        if (buf == NULL || pos + APP_WF_POINT_SIZE > APP_WF_BUF_SIZE) {
-            ASSERT(xSemaphoreTake(wf_ready_sem, portMAX_DELAY) == pdTRUE);
-            
-            wf_current = !wf_current;
-            buf = wf_buffers[wf_current];
-            pos = 0;
-
-            // FIXME: Use `psc-common`.
-            const uint8_t data[] = {0x10};
-            APP_RPMSG_Send(data, 1);
+        uint32_t data = counter;
+        for (int i = 3; i >= 0; --i) {
+            txbuf[i] = data & 0xFF;
+            data = data >> 8;
         }
+        ASSERT(xSemaphoreTake(send_sem, portMAX_DELAY) == pdTRUE);
 
-        frame.len = APP_WF_POINT_SIZE;
-        memcpy(frame.data, buf + pos, APP_WF_POINT_SIZE);
-        pos += APP_WF_POINT_SIZE;
-
-        ASSERT(xSemaphoreTake(wf_send_sem, portMAX_DELAY) == pdTRUE);
-
-        if (APP_FLEXCAN_Send(&frame, APP_FOREVER_MS) != 0) {
-            PANIC_("Cannot send CAN frame");
+        //APP_INFO("Transfer SPI message %d", counter);
+        if (APP_ECSPI_Transfer(txbuf, NULL, 4, APP_FOREVER_MS) != 0) {
+            PANIC_("Cannot transfer SPI message");
         }
-
-        *(uint64_t*)&frame.data += 1;
-
-
-        if (buf != NULL) {
-            
-        }
+        counter += 1;
     }
-}
-
-static void APP_Task_FlexcanReceive(void *param) {
-    APP_FLEXCAN_Frame frame;
-
-    APP_INFO("FLEXCAN receive task start");
-    
-    while (true) {
-        if (APP_FLEXCAN_Receive(&frame, APP_FOREVER_MS) == 0) {
-            PRINTF("[INFO] FLEXCAN: 0x%03X # ", frame.id);
-            for (uint8_t i = 0; i < frame.len; ++i) {
-                PRINTF("%0X ", frame.data[frame.len - i - 1]);
-            }
-            PRINTF("\r\n");
-        } else {
-            PANIC_("Cannot receive CAN frame");
-        }
-    }
-}
-
-static void APP_Task_Rpmsg(void *param) {
-    APP_INFO("RPMSG task start");
-
-    if (APP_RPMSG_Init() != 0) {
-        APP_ERROR("RPMSG init error");
-        return;
-    }
-
-    while(true) {
-        uint32_t len = 0;
-        uint8_t *buffer = wf_buffers[!wf_current];
-        // FIXME: Avoid buffer switching while receiving data.
-        int32_t status = APP_RPMSG_Receive(buffer, &len, APP_RPMSG_BUF_SIZE, APP_FOREVER_MS);
-        APP_INFO("RPMSG receive status: %d", status);
-        if (status == 0) {
-            // FIXME: Use `psc-common`.
-            ASSERT(len == APP_RPMSG_BUF_SIZE && buffer[0] == 0x11);
-            PRINTF("[INFO] RPMSG: [%d] ", len);
-            for (uint32_t i = 0; i < len; ++i) {
-                PRINTF("%02X ", buffer[i]);
-            }
-            PRINTF("\r\n");
-        } else {
-            PANIC_("RPMSG receive error");
-        }
-    }
-
-    APP_RPMSG_Deinit();
 }
 
 int main(void) {
@@ -129,29 +49,19 @@ int main(void) {
     PRINTF("\r\n\r\n");
     APP_INFO("Program start");
 
-    wf_send_sem = xSemaphoreCreateBinary();
-    wf_ready_sem = xSemaphoreCreateBinary();
+    SemaphoreHandle_t send_sem = xSemaphoreCreateBinary();
+    ASSERT(send_sem);
 
-    APP_FLEXCAN_Init(APP_FLEXCAN_Baudrate_1000, 0x321);
+    ASSERT(APP_ECSPI_Init(50000000) == 0);
     
     /* Create tasks. */
     xTaskCreate(
-        APP_Task_FlexcanSend, "FLEXCAN task",
-        APP_TASK_STACK_SIZE, NULL, tskIDLE_PRIORITY + 3, NULL
+        APP_Task_EcspiSend, "ECSPI send task",
+        APP_TASK_STACK_SIZE, (void *)send_sem, tskIDLE_PRIORITY + 1, NULL
     );
-
-    xTaskCreate(
-        APP_Task_Rpmsg, "RPMSG task",
-        APP_TASK_STACK_SIZE, NULL, tskIDLE_PRIORITY + 2, NULL
-    );
-
-    xTaskCreate(
-        APP_Task_FlexcanReceive, "FLEXCAN Receive task",
-        APP_TASK_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL
-    );    
 
     APP_INFO("Start GPT");
-    APP_GPT_Init(APP_GPT_SEC/10, wf_send_sem);
+    APP_GPT_Init(APP_GPT_SEC/100000, send_sem);
 
 
     /* Start FreeRTOS scheduler. */

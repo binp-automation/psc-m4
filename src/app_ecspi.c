@@ -67,10 +67,10 @@ static volatile ecspi_state_t ecspiState;
 static SemaphoreHandle_t xferSemaphore = NULL;
 
 
+static void _ECSPI_Config(ecspi_init_config_t* initConfig);
 static bool _ECSPI_TransmitBurst();
 static bool _ECSPI_ReceiveBurst();
 //static bool _ECSPI_GetTransferStatus();
-static void _ECSPI_Config(ecspi_init_config_t* initConfig);
 
 /*! @brief ECSPI interrupt handler. */
 void BOARD_ECSPI_MASTER_HANDLER();
@@ -87,7 +87,6 @@ void APP_ECSPI_HardwareInit() {
     /* Configure ecspi pin IOMUX */
     configure_ecspi_pins(BOARD_ECSPI_MASTER_BASEADDR);
 }
-
 
 uint8_t APP_ECSPI_Init(uint32_t baud_rate) {
     ecspi_init_config_t ecspiMasterInitConfig = {
@@ -114,6 +113,86 @@ uint8_t APP_ECSPI_Init(uint32_t baud_rate) {
     return 0;
 }
 
+/* ECSPI module initialize */
+static void _ECSPI_Config(ecspi_init_config_t* initConfig) {
+    /* Initialize ECSPI transfer state. */
+    ecspiState.isBusy = false;
+
+    /* Initialize ECSPI, parameter configure */
+    ECSPI_Init(BOARD_ECSPI_MASTER_BASEADDR, initConfig);
+
+    /* Set FlexCAN interrupt priority. */
+    NVIC_SetPriority(BOARD_ECSPI_MASTER_IRQ_NUM, APP_ECSPI_IRQ_PRIORITY);
+    /* Call core API to enable the IRQ. */
+    NVIC_EnableIRQ(BOARD_ECSPI_MASTER_IRQ_NUM);
+}
+
+/* The interrupt service routine triggered by ECSPI interrupt */
+void BOARD_ECSPI_MASTER_HANDLER() {
+    BaseType_t txHptw = pdFALSE;
+
+    /* Receive data from RXFIFO */
+    _ECSPI_ReceiveBurst();
+
+    /* Push data left */
+    if(ecspiState.txSize) {
+        _ECSPI_TransmitBurst();
+        return;
+    }
+
+    /* No data left to push, but still waiting for rx data, enable receive data available interrupt. */
+    if(ecspiState.rxSize) {
+        ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagRxfifoReady, true);
+        return;
+    }
+
+    /* Disable interrupt */
+    ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagTxfifoEmpty, false);
+    ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagRxfifoReady, false);
+
+    /* Clear the status */
+    ECSPI_ClearStatusFlag(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagTxfifoTc);
+    ECSPI_ClearStatusFlag(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagRxfifoOverflow);
+
+    ecspiState.isBusy = false;
+    xSemaphoreGiveFromISR(xferSemaphore, &txHptw);
+
+    /* Yield to higher priority task */
+    portYIELD_FROM_ISR(txHptw);
+}
+
+/* Transmit and Receive an amount of data in no-blocking mode with interrupt. */
+uint8_t APP_ECSPI_Transfer(uint8_t* txBuffer, uint8_t* rxBuffer, uint32_t transferSize, uint32_t timeout) {
+    uint32_t len;
+
+    if((ecspiState.isBusy) || (transferSize == 0)) {
+        return false;
+    }
+
+    /* Update the burst length to real size */
+    len = (uint32_t)(transferSize * 8 - 1);
+    ECSPI_SetBurstLength(BOARD_ECSPI_MASTER_BASEADDR, len);
+
+    /* Configure the transfer */
+    ecspiState.txBuffPtr = txBuffer;
+    ecspiState.rxBuffPtr = rxBuffer;
+    ecspiState.txSize = transferSize;
+    ecspiState.rxSize = 0;
+
+    /* Fill the TXFIFO */
+    _ECSPI_TransmitBurst();
+    /* Enable interrupts */
+    ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagTxfifoEmpty, true);
+
+    /* Wait for transfer to complete */
+    if (xSemaphoreTake(xferSemaphore, ms_to_ticks(timeout)) != pdTRUE) {
+        // FIXME: Recover from timeout.
+        APP_ERROR("ECSPI transfer timed out");
+        return 1;
+    }
+
+    return 0;
+}
 
 /* Fill the TXFIFO. */
 static bool _ECSPI_TransmitBurst() {
@@ -177,38 +256,6 @@ static bool _ECSPI_ReceiveBurst() {
     return true;
 }
 
-/* Transmit and Receive an amount of data in no-blocking mode with interrupt. */
-uint8_t APP_ECSPI_Transfer(uint8_t* txBuffer, uint8_t* rxBuffer, uint32_t transferSize, uint32_t timeout) {
-    uint32_t len;
-
-    if((ecspiState.isBusy) || (transferSize == 0)) {
-        return false;
-    }
-
-    /* Update the burst length to real size */
-    len = (uint32_t)(transferSize * 8 - 1);
-    ECSPI_SetBurstLength(BOARD_ECSPI_MASTER_BASEADDR, len);
-
-    /* Configure the transfer */
-    ecspiState.txBuffPtr = txBuffer;
-    ecspiState.rxBuffPtr = rxBuffer;
-    ecspiState.txSize = transferSize;
-    ecspiState.rxSize = 0;
-
-    /* Fill the TXFIFO */
-    _ECSPI_TransmitBurst();
-    /* Enable interrupts */
-    ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagTxfifoEmpty, true);
-
-    /* Wait for transfer to complete */
-    if (xSemaphoreTake(xferSemaphore, ms_to_ticks(timeout)) != pdTRUE) {
-        /* FIXME: Recover from timeout. */
-        APP_ERROR("ECSPI transfer timed out");
-        return 1;
-    }
-
-    return 0;
-}
 
 /* Get transfer status. */
 /*
@@ -216,49 +263,3 @@ static bool _ECSPI_GetTransferStatus() {
     return ecspiState.isBusy;
 }
 */
-
-/* ECSPI module initialize */
-static void _ECSPI_Config(ecspi_init_config_t* initConfig) {
-    /* Initialize ECSPI transfer state. */
-    ecspiState.isBusy = false;
-
-    /* Initialize ECSPI, parameter configure */
-    ECSPI_Init(BOARD_ECSPI_MASTER_BASEADDR, initConfig);
-
-    /* Call core API to enable the IRQ. */
-    NVIC_EnableIRQ(BOARD_ECSPI_MASTER_IRQ_NUM);
-}
-
-/* The interrupt service routine triggered by ECSPI interrupt */
-void BOARD_ECSPI_MASTER_HANDLER() {
-    BaseType_t txHptw = pdFALSE;
-
-    /* Receive data from RXFIFO */
-    _ECSPI_ReceiveBurst();
-
-    /* Push data left */
-    if(ecspiState.txSize) {
-        _ECSPI_TransmitBurst();
-        return;
-    }
-
-    /* No data left to push, but still waiting for rx data, enable receive data available interrupt. */
-    if(ecspiState.rxSize) {
-        ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagRxfifoReady, true);
-        return;
-    }
-
-    /* Disable interrupt */
-    ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagTxfifoEmpty, false);
-    ECSPI_SetIntCmd(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagRxfifoReady, false);
-
-    /* Clear the status */
-    ECSPI_ClearStatusFlag(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagTxfifoTc);
-    ECSPI_ClearStatusFlag(BOARD_ECSPI_MASTER_BASEADDR, ecspiFlagRxfifoOverflow);
-
-    ecspiState.isBusy = false;
-    xSemaphoreGiveFromISR(xferSemaphore, &txHptw);
-
-    /* Yield to higher priority task */
-    portYIELD_FROM_ISR(txHptw);
-}
